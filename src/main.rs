@@ -95,21 +95,29 @@ fn main() {
 
     println!("Success");
 
-    let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 1024, height: 1024 },
+    let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 512, height: 512 },
         Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
 
-    let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), (0..1024*1024*4).map(|_| 0u8))
+    let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), (0..512*512*4).map(|_| 0u8))
         .expect("Failed to create buffer");
 
+    let shader = mandelbrot::Shader::load(device.clone()).expect("Could not load mandelbrot shader");
+
+    let compute_pipeline = Arc::new(ComputePipeline::new(device.clone(), &shader.main_entry_point(), &()).unwrap());
+
+    let set = Arc::new(PersistentDescriptorSet::start(compute_pipeline.clone(), 0)
+        .add_image(image.clone()).unwrap()
+        .build().unwrap());
+
     let command_buffer = AutoCommandBufferBuilder::new(device.clone(), queue.family()).unwrap()
-        .clear_color_image(image.clone(), ClearValue::Float([0.5, 0.1, 0.3, 1.0])).unwrap()
+        .dispatch([512 / 8, 512 / 8, 1], compute_pipeline.clone(), set.clone(), ()).unwrap()
         .copy_image_to_buffer(image.clone(), buf.clone()).unwrap()
         .build().unwrap();
 
     command_buffer.execute(queue.clone()).unwrap().then_signal_fence_and_flush().unwrap().wait(None).unwrap();
+    
     let buffer_content = buf.read().unwrap();
-
-    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(512, 512, &buffer_content[..]).unwrap();
     image.save("image.png").unwrap();
 }
 
@@ -117,5 +125,12 @@ mod cs {
     vulkano_shaders::shader!{
         ty: "compute",
         path: "src/op.glsl"
+    }
+}
+
+mod mandelbrot {
+    vulkano_shaders::shader!{
+        ty: "compute",
+        path: "src/mandelbrot.glsl"
     }
 }
