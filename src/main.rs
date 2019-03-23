@@ -2,13 +2,17 @@ use image::{ImageBuffer, Rgba};
 use vulkano::instance::{Instance, InstanceExtensions, PhysicalDevice};
 use vulkano::device::{Device, DeviceExtensions, Features};
 use vulkano::buffer::{CpuAccessibleBuffer, BufferUsage};
-use vulkano::command_buffer::{CommandBuffer, AutoCommandBufferBuilder};
+use vulkano::command_buffer::{CommandBuffer, DynamicState, AutoCommandBufferBuilder};
 use vulkano::sync::GpuFuture;
 use std::sync::Arc;
-use vulkano::pipeline::ComputePipeline;
+use vulkano::pipeline::{viewport::Viewport, GraphicsPipeline, ComputePipeline};
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::format::{ClearValue, Format};
 use vulkano::image::{StorageImage, Dimensions};
+use vulkano::framebuffer::{Framebuffer, Subpass};
+
+struct Vertex { position: [f32; 2] } 
+vulkano::impl_vertex!(Vertex, position);
 
 fn main() {
    
@@ -93,6 +97,7 @@ fn main() {
         assert_eq!(*val, n as u32 * 12);
     }
 
+
     println!("Success");
 
     let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 512, height: 512 },
@@ -104,6 +109,7 @@ fn main() {
     let shader = mandelbrot::Shader::load(device.clone()).expect("Could not load mandelbrot shader");
 
     let compute_pipeline = Arc::new(ComputePipeline::new(device.clone(), &shader.main_entry_point(), &()).unwrap());
+
 
     let set = Arc::new(PersistentDescriptorSet::start(compute_pipeline.clone(), 0)
         .add_image(image.clone()).unwrap()
@@ -117,8 +123,80 @@ fn main() {
     command_buffer.execute(queue.clone()).unwrap().then_signal_fence_and_flush().unwrap().wait(None).unwrap();
     
     let buffer_content = buf.read().unwrap();
+    let mand = ImageBuffer::<Rgba<u8>, _>::from_raw(512, 512, &buffer_content[..]).unwrap();
+    mand.save("mandelbor.png").unwrap();
+
+    let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), (0..512*512*4).map(|_| 0u8))
+        .expect("Failed to create buffer");
+
+    /* Render a triangle! */
+    let v1 = Vertex { position: [-0.5, -0.5] };
+    let v2 = Vertex { position: [0.0, 0.5]   };
+    let v3 = Vertex { position: [0.5, -0.25] };
+    
+    let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+        vec![v1, v2, v3].into_iter()).unwrap();
+
+    let render_pass = Arc::new(vulkano::single_pass_renderpass!(device.clone(),
+        attachments: {
+            color: {
+                load: Clear,
+                store: Store,
+                format: Format::R8G8B8A8Unorm,
+                samples: 1,
+            }
+        },
+        pass: {
+            color: [color],
+            depth_stencil: {}
+        }
+    ).unwrap());
+
+    let framebuffer = Arc::new(Framebuffer::start(render_pass.clone())
+        .add(image.clone()).unwrap()
+        .build().unwrap());
+
+    let vs = vertex::Shader::load(device.clone()).expect("Failed to create vertex shader");
+    let fs = frag::Shader::load(device.clone()).expect("Failed to create fragment shader");
+
+    let pipeline = Arc::new(GraphicsPipeline::start()
+        .vertex_input_single_buffer::<Vertex>()
+        .vertex_shader(vs.main_entry_point(), ())
+        .viewports_dynamic_scissors_irrelevant(1)
+        .fragment_shader(fs.main_entry_point(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .build(device.clone())
+        .unwrap());
+
+    let dynamic_state = DynamicState {
+        viewports: Some(vec![Viewport {
+            origin: [0.0,0.0],
+            dimensions: [512.0, 512.0],
+            depth_range: 0.0 .. 1.0,
+        }]),
+        .. DynamicState::none()
+    };
+
+    let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(
+        device.clone(), queue.family()).unwrap()
+        .begin_render_pass(framebuffer.clone(), false, vec![[0.0,0.0,0.0,0.0].into()])
+        .unwrap()
+        .draw(pipeline.clone(), &dynamic_state, vertex_buffer.clone(), (), ())
+        .unwrap()
+        .end_render_pass()
+        .unwrap()
+        .copy_image_to_buffer(image.clone(), buf.clone())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    command_buffer.execute(queue.clone()).unwrap()
+        .then_signal_fence_and_flush().unwrap()
+        .wait(None).unwrap();
+
+    let buffer_content = buf.read().unwrap();
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(512, 512, &buffer_content[..]).unwrap();
-    image.save("image.png").unwrap();
+    image.save("triangle.png").unwrap();
 }
 
 mod cs {
@@ -132,5 +210,19 @@ mod mandelbrot {
     vulkano_shaders::shader!{
         ty: "compute",
         path: "src/mandelbrot.glsl"
+    }
+}
+
+mod vertex {
+    vulkano_shaders::shader!{
+        ty: "vertex",
+        path: "src/vertex.glsl"
+    }
+}
+
+mod frag {
+    vulkano_shaders::shader!{
+        ty: "fragment",
+        path: "src/frag.glsl"
     }
 }
